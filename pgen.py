@@ -1,7 +1,8 @@
 import os
+from clip_line import clip_line
 from typing import Callable
 from enum import Enum
-from math import pi, sin, cos, tan, asin, floor, sqrt
+from math import pi, sin, cos, tan, asin, floor, sqrt, ceil
 
 import svgwrite
 
@@ -61,15 +62,43 @@ def lasercutter_base_line(
     # Pattern:
     # o  ----    ----    ----    ----  o
     safe_zone_pt = 3
+    end_dash_length_pt = 3
+    safe_zone2_pt = 3
     dash_length_pt = 7.2
     gap_length_pt = 7.2
     full_line_length_pt = sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) * PT_PER_UNIT
 
-    line_length_pt = full_line_length_pt - 2 * safe_zone_pt
+    unsafe_line_length_pt = full_line_length_pt - 2 * safe_zone_pt
+    if unsafe_line_length_pt <= 0:
+        return
+
+    end1_t_start = safe_zone_pt / full_line_length_pt
+    end1_t_end = (safe_zone_pt + end_dash_length_pt) / full_line_length_pt
+    end_style = f'stroke:red;stroke-width:{thickness_pt}pt;'
+
+    x_end1_start = weighted_average(x1, x2, end1_t_start)
+    y_end1_start = weighted_average(y1, y2, end1_t_start)
+    x_end1_end = weighted_average(x1, x2, end1_t_end)
+    y_end1_end = weighted_average(y1, y2, end1_t_end)
+
+    end1_start = (x_end1_start * UNIT, y_end1_start * UNIT)
+    end1_end = (x_end1_end * UNIT, y_end1_end * UNIT)
+    dwg.add(dwg.line(start=end1_start, end=end1_end, style=end_style))
+
+    x_end2_start = weighted_average(x1, x2, 1 - end1_t_start)
+    y_end2_start = weighted_average(y1, y2, 1 - end1_t_start)
+    x_end2_end = weighted_average(x1, x2, 1 - end1_t_end)
+    y_end2_end = weighted_average(y1, y2, 1 - end1_t_end)
+
+    end2_start = (x_end2_start * UNIT, y_end2_start * UNIT)
+    end2_end = (x_end2_end * UNIT, y_end2_end * UNIT)
+    dwg.add(dwg.line(start=end2_start, end=end2_end, style=end_style))
+
+    line_length_pt = unsafe_line_length_pt - 2 * (end_dash_length_pt + safe_zone2_pt)
     if line_length_pt <= 0:
         return
 
-    t_start = safe_zone_pt / full_line_length_pt
+    t_start = (safe_zone_pt + end_dash_length_pt + safe_zone2_pt) / full_line_length_pt
     t_end = 1 - t_start
     x_start = weighted_average(x1, x2, t_start)
     y_start = weighted_average(y1, y2, t_start)
@@ -79,8 +108,12 @@ def lasercutter_base_line(
     dash_count = 1
     while dash_count * dash_length_pt + (dash_count - 1) * gap_length_pt <= line_length_pt:
         dash_count += 1
-
     dash_offset_pt = (dash_count * dash_length_pt + (dash_count - 1) * gap_length_pt - line_length_pt) / 2
+
+    # dash_count = 1
+    # while dash_count * dash_length_pt + (dash_count + 1) * gap_length_pt <= line_length_pt:
+    #     dash_count += 1
+    # dash_offset_pt = ((dash_count + 2) * dash_length_pt + (dash_count + 1) * gap_length_pt - line_length_pt) / 2
 
     start = (x_start * UNIT, y_start * UNIT)
     end = (x_end * UNIT, y_end * UNIT)
@@ -135,11 +168,11 @@ def miura_ori(
     print(f'delta: {delta / pi:.2f} pi')
     print(f'min cell side: {smallest_cell_side:.2f} units')
 
-    cells_hor = floor(target_width / cell_width)
-    cells_vert = floor(target_height / cell_height)
-    height_cut = cell_height * tan(alpha)
+    cells_hor = int(target_width / cell_width)
+    cells_vert = int(target_height / cell_height)
+    cells_vert_offset = -int(ceil(tan(alpha) * cell_width / cell_height))
     width = cells_hor * cell_width
-    height = cells_vert * cell_height - height_cut
+    height = cells_vert * cell_height
 
     assert alpha >= beta
     assert smallest_cell_side >= 0
@@ -162,19 +195,16 @@ def miura_ori(
         size=(width * UNIT, height * UNIT),
         viewBox=f'0 0 {width * DOTS_PER_UNIT} {height * DOTS_PER_UNIT}')
 
-    def clip_x(x):
-        return max(0.0, min(x, width))
-
-    def clip_y(y):
-        return max(0.0, min(y, height))
-
     def add_line(start_x, start_y, end_x, end_y, line_type):
-        x1 = clip_x(start_x * cell_width)
-        y1 = clip_y(start_y * cell_height - height_cut)
+        x1 = start_x * cell_width
+        y1 = start_y * cell_height
 
-        x2 = clip_x(end_x * cell_width)
-        y2 = clip_y(end_y * cell_height - height_cut)
-        line_func(dwg, x1, y1, x2, y2, line_type)
+        x2 = end_x * cell_width
+        y2 = end_y * cell_height
+
+        line = clip_line(x1, y1, x2, y2, 0.0, 0.0, width, height)
+        if line is not None:
+            line_func(dwg, *line, line_type)
 
     def angle_offset(angle):
         return cell_width / cell_height * tan(angle)
@@ -187,7 +217,7 @@ def miura_ori(
 
     # grid
     for i in range(cells_hor):
-        for j in range(cells_vert):
+        for j in range(cells_vert_offset, cells_vert):
             offset_left = i % 2
             offset_right = 1 - i % 2
             offset_top = angle_offset([beta, alpha][j % 2])
@@ -195,8 +225,8 @@ def miura_ori(
 
             x11 = x21 = i
             x12 = x22 = i + 1
-            y11 = j + offset_left * offset_top if j > 0 else 0
-            y12 = j + offset_right * offset_top if j > 0 else 0
+            y11 = j + offset_left * offset_top
+            y12 = j + offset_right * offset_top
             y21 = j + 1 + offset_left * offset_bottom
             y22 = j + 1 + offset_right * offset_bottom
 
@@ -243,6 +273,18 @@ def main():
         'cell_height': 3
     }
 
+    miura_ori(
+        radius=12,
+        beta=3/16 * pi,
+        target_width=20,
+        target_height=20,
+        cell_width=1,
+        cell_height=1,
+        line_func=simulator_line,
+        filename='test.svg'
+    )
+
+
     scale_config = {
         'radius': 12,
         'beta': 3/16 * pi,
@@ -258,11 +300,11 @@ def main():
         'beta': 3/16 * pi,
         'target_width': 20,
         'target_height': 20,
-        'cell_width': 1.5,
+        'cell_width': 2,
     }
 
     for i in [0.5, 0.75, 1, 1.5]:
-        height = i * 1.5
+        height = i * 2
         miura_pack('height', f'{i}-1', dict(height_config, cell_height=height))
 
     beta_config = {
